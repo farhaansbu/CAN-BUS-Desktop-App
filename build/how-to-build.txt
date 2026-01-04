@@ -1,0 +1,14 @@
+This assumes you have CMake installed:
+
+In the build directory: 
+
+cmake ../CAN-Bus-Desktop-App
+
+
+After configuring successfully, run:
+
+cmake --build . -j
+
+After building successfuly, launch the executable:
+
+./src/CAN_BUS_IOT_exe
