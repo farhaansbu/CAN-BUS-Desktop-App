@@ -12,15 +12,19 @@ int a{ 5 };
 
 int main()
 {
-	std::cout << "Initializing Engine\n";
-	DashboardEngine engine;
+    std::cout << "Initializing Engine\n";
+    DashboardEngine engine;
 
-	std::cout << "Creating rendering thread!\n";
-	std::thread renderThread(&DashboardEngine::renderingThread, &engine);
-	renderThread.detach();
+    // Initialization
+    engine.init();
 
-	engine.init();	
-	engine.run();
+    // Run networking/engine loop in the background
+    std::thread engineThread(&DashboardEngine::run, &engine);
 
-	return 0;
+    // Run the GUI on the main thread 
+    engine.renderingThread();
+
+    engineThread.join();
+
+    return 0;
 }
