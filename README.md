@@ -6,8 +6,8 @@ A real-time **CAN bus visualization and diagnostics dashboard** built as an end-
 - **C++ desktop application** receives, parses, decodes, and visualizes CAN data
 - **SFML + ImGui** used for rendering, networking, and UI
 - Designed using **multi-threading, producer–consumer queues, and clean separation of concerns**
-<img width="500" height="auto" alt="can_bus_project_ss1" src="https://github.com/user-attachments/assets/8f1b7008-1ed2-4c1c-8c87-b8b29bb250c4" />
-<img width="500" height="auto" alt="can_bus_project_ss2" src="https://github.com/user-attachments/assets/162d68d7-be26-4615-af50-265b9ccc669a" />
+<img width="300" height="auto" alt="can_bus_project_ss1" src="https://github.com/user-attachments/assets/8f1b7008-1ed2-4c1c-8c87-b8b29bb250c4" />
+<img width="300" height="auto" alt="can_bus_project_ss2" src="https://github.com/user-attachments/assets/162d68d7-be26-4615-af50-265b9ccc669a" />
 
 
 
