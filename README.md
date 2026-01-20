@@ -28,7 +28,7 @@ This project demonstrates a complete telemetry pipeline:
 
 ## Architecture Diagram
 
-![System Architecture](docs/architecture.png)
+<img width="700" height="auto" alt="ChatGPT Image Jan 20, 2026, 11_56_37 AM" src="https://github.com/user-attachments/assets/d6f99d24-807f-44fc-9c50-54841bca32f0" />
 
 ---
 
