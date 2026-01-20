@@ -1,7 +1,10 @@
 
 add_executable (CAN_BUS_IOT_exe
-                DashboardEngine.cpp
+                App.cpp
                 DashboardUI.cpp
+                CanFrameParser.cpp
+                TcpServer.cpp
+                TelemetryModel.cpp
                 main.cpp)
 
 target_include_directories(CAN_BUS_IOT_exe

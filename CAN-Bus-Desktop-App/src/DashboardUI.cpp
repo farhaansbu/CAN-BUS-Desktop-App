@@ -1,11 +1,13 @@
 #include <iostream>
-#include "SFML/Graphics.hpp"
+#include <SFML/Graphics.hpp>
+
 #include "imgui.h"
 #include "imgui-SFML.h"
 #include "DashboardUI.h"
 
 
-#define CAN_TABLE_COLUMNS 5
+
+constexpr size_t CAN_TABLE_COLUMNS{ 5 };
 
 namespace CAN_Table_Column
 {
@@ -22,28 +24,28 @@ namespace CAN_Table_Column
 
 void DashboardUI::init()
 {
-	m_window.create(sf::VideoMode({ 1920, 1080 }), "CAN Bus Dashboard");
-	m_window.setFramerateLimit(60);
-	ImGui::SFML::Init(m_window);
+	window_.create(sf::VideoMode({ 1920, 1080 }), "CAN Bus Dashboard");
+	window_.setFramerateLimit(60);
+	ImGui::SFML::Init(window_);
 
 	std::string fontPath = std::string(ASSETS_DIR) + "/Fonts/robotoMono-regular.ttf";
 
-	std::cout << "Loading first font!\n";
-	m_ImGuiFont = ImGui::GetIO().Fonts->AddFontFromFileTTF(fontPath.c_str(), 13.0f, nullptr);
+	imGuiFont_ = ImGui::GetIO().Fonts->AddFontFromFileTTF(fontPath.c_str(), 13.0f, nullptr);
 	ImGui::SFML::UpdateFontTexture();
-	ImGui::GetIO().FontDefault = m_ImGuiFont;
+	ImGui::GetIO().FontDefault = imGuiFont_;
 
 	ImGui::GetStyle().ScaleAllSizes(2.0f);
 	ImGui::GetIO().FontGlobalScale = 2.0f;
+
+
 
 	SetupImGuiStyle();
 
 }
 
 
-void DashboardUI::sGUI()
+void DashboardUI::render(const TelemetryModel& model)
 {
-	init();
 
 	sf::Texture tach;
 	tach.loadFromFile(std::string(ASSETS_DIR) + "/Tachometer2.png");
@@ -70,49 +72,35 @@ void DashboardUI::sGUI()
 	speed.setPosition({ tachometer.getPosition().x + tachometer.getLocalBounds().size.x / 2 - speed.getLocalBounds().size.x / 2, 100 });
 
 
-	while (m_window.isOpen())
-	{
+	// Draw SFML stuff
+	window_.clear(sf::Color{ 43, 47, 59 });
+	window_.draw(tachometer);
+	window_.draw(tachometer_arrow);
+	window_.draw(speed);
 
-		ImGui::SFML::Update(m_window, m_deltaClock.restart());
-	
-		
+	// Draw ImGUI stuff
+	render_imgui(model);
+	ImGui::SFML::Render(window_);
 
-		// Event handling
-		while (const auto event = m_window.pollEvent())
-		{
-			ImGui::SFML::ProcessEvent(m_window, *event);
-			if (event->is<sf::Event::Closed>())
-			{
-				m_window.close();
-			}
-		}
+	// Display
+	window_.display();
 
-		//angle += 0.2f;
-		tachometer_arrow.setRotation(sf::degrees(angle));
-
-		// Draw SFML stuff
-		m_window.clear(sf::Color{ 43, 47, 59 });
-		m_window.draw(tachometer);
-		m_window.draw(tachometer_arrow);
-		m_window.draw(speed);
-
-		// Draw ImGUI stuff
-		sImGui();
-		ImGui::SFML::Render(m_window);
-
-		// Display
-		m_window.display();
-	}
-
-	// Cleanup
-	ImGui::SFML::Shutdown();
 }
 
-void DashboardUI::sImGui()
+void DashboardUI::render_imgui(const TelemetryModel& model)
 {
-	ImGui::SetNextWindowPos(ImVec2(960.0f, 75.0f), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(900.0f, 900.0f), ImGuiCond_FirstUseEver);
-	ImGui::Begin("Diagnostics", 0, ImGuiWindowFlags_NoCollapse);
+	auto& recent_frames = model.frames();
+	auto& model_signals = model.signals();
+
+	const float winW = static_cast<float>(window_.getSize().x);
+    const float winH = static_cast<float>(window_.getSize().y);
+
+    // Right half of the SFML window
+    ImGui::SetNextWindowPos(ImVec2(winW * 0.5f, 0.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(winW * 0.5f, winH), ImGuiCond_Always);
+
+	// ImGui Stuff
+	ImGui::Begin("Diagnostics", 0, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
 	if (ImGui::BeginTabBar("Items"))
 	{
 		if (ImGui::BeginTabItem("Information"))
@@ -133,10 +121,10 @@ void DashboardUI::sImGui()
 			// Collapsible: Live Data
 			if (ImGui::CollapsingHeader("Live Data"))
 			{
-				ImGui::Text("Engine RPM: %d", 3200);
-				ImGui::Text("Vehicle Speed: %d MPH", 45);
-				ImGui::Text("Throttle Position: %.1f %%", 32.4f);
-				ImGui::Text("Coolant Temp: %.1f *C", 90.0f);
+				ImGui::Text("Engine RPM: %.3f", model_signals.rpm);
+				ImGui::Text("Vehicle Speed: %.0f MPH", model_signals.speed_mph);
+				ImGui::Text("Throttle Position: %.1f%%", model_signals.throttle_pct);
+				ImGui::Text("Coolant Temp: %.1f *C", model_signals.coolant_temp_c);
 				ImGui::Text("Battery Voltage: %.2f V", 13.8f);
 			}
 
@@ -174,19 +162,29 @@ void DashboardUI::sImGui()
 				ImGui::TableSetupColumn("Data");
 				ImGui::TableHeadersRow();
 
-				for (int i = 0; i < 10; ++i)
+				for (size_t i = 0; i < std::min<size_t>(20, recent_frames.size()); ++i)
 				{
 					ImGui::TableNextRow();
 					ImGui::TableSetColumnIndex(CAN_Table_Column::Number);
 					ImGui::Text("%d", i);
 					ImGui::TableSetColumnIndex(CAN_Table_Column::Timestamp); 
-					ImGui::Text("0.00213");
+					ImGui::Text("%.3f", recent_frames[i].timestamp_s);
 					ImGui::TableSetColumnIndex(CAN_Table_Column::ID);
-					ImGui::Text("0x153");
+					ImGui::Text("%X", recent_frames[i].id);
 					ImGui::TableSetColumnIndex(CAN_Table_Column::Length);
-					ImGui::Text("%d", 8);
+					ImGui::Text("%d", recent_frames[i].dlc);
 					ImGui::TableSetColumnIndex(CAN_Table_Column::Data);
-					ImGui::TextColored(ImVec4(0, 1, 0, 1), "OK");
+					for (int b = 0; b < 8; ++b)
+					{
+						if (b < recent_frames[i].dlc)
+							ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "%02X", recent_frames[i].data[b]);
+						else
+							ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "--");
+
+						if (b != 7)
+							ImGui::SameLine();
+					}
+					//ImGui::TextColored(ImVec4(0, 1, 0, 1), "OK");
 				}
 
 				ImGui::EndTable();
@@ -202,10 +200,7 @@ void DashboardUI::sImGui()
 }
 
 
-void DashboardUI::setAngle(float a)
-{
-	angle = a;
-}
+
 
 void DashboardUI::SetupImGuiStyle()
 {

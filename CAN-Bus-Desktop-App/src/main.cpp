@@ -1,30 +1,25 @@
-#include "imgui.h"
-#include "imgui-SFML.h"
-#include <SFML/Network.hpp>
-#include <SFML/Graphics.hpp>
-#include "DashboardEngine.h"
+#include "App.h"
 
-#include <iostream>
-#include <thread>
-
-
-int a{ 5 };
 
 int main()
 {
-    std::cout << "Initializing Engine\n";
-    DashboardEngine engine;
+	//std::cout << "Initializing Engine\n";
+	//DashboardEngine engine;
 
-    // Initialization
-    engine.init();
+	//std::cout << "Creating rendering thread!\n";
+	//std::thread renderThread(&DashboardEngine::renderingThread, &engine);
+	//renderThread.detach();
 
-    // Run networking/engine loop in the background
-    std::thread engineThread(&DashboardEngine::run, &engine);
+	//engine.init();	
+	//engine.run();
 
-    // Run the GUI on the main thread 
-    engine.renderingThread();
+	//return 0;
 
-    engineThread.join();
+    // Replace with your port
+    const unsigned short port = 3333;
 
+    App app(port);
+    app.run();
+    
     return 0;
 }
