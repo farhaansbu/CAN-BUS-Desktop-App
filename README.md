@@ -132,11 +132,20 @@ This step generates the build system files.
 
 ### 2. Build the executable
 
+#### Linux / WSL / macOS
+
 ```
 cmake --build . -j
 ```
-
 The `-j` flag enables parallel compilation.
+
+#### Windows (PowerShell)
+
+```powershell
+cmake --build . --config Release
+```
+
+
 
 ---
 
@@ -151,7 +160,7 @@ The `-j` flag enables parallel compilation.
 #### Windows (PowerShell)
 
 ```powershell
-.\src\CAN_BUS_IOT_exe.exe
+.\src\Release\CAN_BUS_IOT_exe.exe
 ```
 
 ---
