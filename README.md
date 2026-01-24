@@ -61,7 +61,7 @@ This project demonstrates a complete telemetry pipeline:
 ## Technologies Used
 
 ### Languages & Libraries
-- C++17
+- C++20
 - SFML (Graphics, Windowing, TCP Networking)
 - ImGui + ImGui-SFML
 
