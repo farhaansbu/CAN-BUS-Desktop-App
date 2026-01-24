@@ -93,7 +93,7 @@ CAN-Bus-Desktop-App/
 ## Requirements
 
 - **CMake** (version 3.15 or newer)
-- A C++17-compatible compiler  
+- A C++20-compatible compiler  
   - GCC / Clang (Linux, WSL)
   - MSVC or MinGW (Windows)
   - Apple Clang (macOS)
