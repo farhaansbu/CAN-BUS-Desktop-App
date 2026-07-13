@@ -11,7 +11,7 @@ A real-time **CAN bus visualization and diagnostics dashboard** built as an end-
 
 
 
-> ⚠️ This project is a **prototype / proof-of-concept** and has not (yet) been validated on a real vehicle.
+> ⚠️ This project is a **prototype** and is still being validated on real vehicles. It has currently been tested with a Subaru Outback 2014.
 
 ---
 
@@ -28,7 +28,7 @@ This project demonstrates a complete telemetry pipeline:
 
 ## Architecture Diagram
 
-![System Architecture](docs/architecture.png)
+<img width="700" height="auto" alt="ChatGPT Image Jan 20, 2026, 11_56_37 AM" src="https://github.com/user-attachments/assets/d6f99d24-807f-44fc-9c50-54841bca32f0" />
 
 ---
 
@@ -61,7 +61,7 @@ This project demonstrates a complete telemetry pipeline:
 ## Technologies Used
 
 ### Languages & Libraries
-- C++17
+- C++20
 - SFML (Graphics, Windowing, TCP Networking)
 - ImGui + ImGui-SFML
 
@@ -93,7 +93,7 @@ CAN-Bus-Desktop-App/
 ## Requirements
 
 - **CMake** (version 3.15 or newer)
-- A C++17-compatible compiler  
+- A C++20-compatible compiler  
   - GCC / Clang (Linux, WSL)
   - MSVC or MinGW (Windows)
   - Apple Clang (macOS)
@@ -132,11 +132,20 @@ This step generates the build system files.
 
 ### 2. Build the executable
 
+#### Linux / WSL / macOS
+
 ```
 cmake --build . -j
 ```
-
 The `-j` flag enables parallel compilation.
+
+#### Windows (PowerShell)
+
+```powershell
+cmake --build . --config Release
+```
+
+
 
 ---
 
@@ -151,7 +160,7 @@ The `-j` flag enables parallel compilation.
 #### Windows (PowerShell)
 
 ```powershell
-.\src\CAN_BUS_IOT_exe.exe
+.\src\Release\CAN_BUS_IOT_exe.exe
 ```
 
 ---
