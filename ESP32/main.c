@@ -1,33 +1,56 @@
-
 #include <string.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <errno.h>
+#include <unistd.h>
+#include <inttypes.h>
+
 #include <sys/param.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
-#include "nvs_flash.h"
+#include "esp_err.h"
+#include "esp_timer.h"
 #include "esp_netif.h"
-#include "freertos/queue.h"
-#include "freertos/semphr.h"
-#include "protocol_examples_common.h"
+#include "nvs_flash.h"
 
 #include "lwip/err.h"
 #include "lwip/sockets.h"
 #include "lwip/sys.h"
 #include <lwip/netdb.h>
+#include "lwip/inet.h"
 
 #include "driver/twai.h"
 
 
+static const char *TAG = "WIFI_VEHICLE_AP";
 
+/* ------- Wi-Fi SoftAP ------- */
+#define AP_SSID                 "ESP32_VEHICLE"
+#define AP_PASS                 "VehicleTest2026"
+#define AP_CHANNEL              6
+#define AP_MAX_CONN             4
+
+
+/* ----- Wi-Fi Connection ----- */
 #define PORT                        CONFIG_EXAMPLE_PORT
 #define KEEPALIVE_IDLE              CONFIG_EXAMPLE_KEEPALIVE_IDLE
 #define KEEPALIVE_INTERVAL          CONFIG_EXAMPLE_KEEPALIVE_INTERVAL
 #define KEEPALIVE_COUNT             CONFIG_EXAMPLE_KEEPALIVE_COUNT
 
+// -- CAN Bus --
+
 #define MESSAGE_ID 0xA0
+#define FUNCTIONAL_REQUEST_ID 0x7DF
+
+#define TWAI_TRANSMIT_TASK_PRIO 8
 #define TWAI_RECEIVE_TASK_PRIO 9
 #define TCP_TASK_PRIO 10
 #define CTRL_TASK_PRIO 11
@@ -39,14 +62,19 @@
 #define READ_TAG "READING"
 #define GEN_TAG "GENERAL"
 
+#define SERVICE_MODE_1 1
 
 // CAN ID = 4 bytes, CAN DATA = 8 bytes, CAN DLC = 1 byte
 const int tcp_payload_size = 13;
 
 // CAN frequency 500k bits 
 static const twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
-static const twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 static const twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(TX_GPIO_NUM, RX_GPIO_NUM, TWAI_MODE_NORMAL);
+
+static const twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+
+
+
 
 static twai_message_t data_message = {
     // Message type and format settings
@@ -66,10 +94,32 @@ static twai_message_t tcp_message;
 // Syncrhonization
 static SemaphoreHandle_t ctrl_task_sem;
 static SemaphoreHandle_t twai_receive_sem;
+static SemaphoreHandle_t twai_transmit_sem;
 static SemaphoreHandle_t done_sem;
 static QueueHandle_t tcp_task_queue;
 
+// PIDs
+#define NUM_PID_TABLE_ELEM 7 // update as needed
 
+typedef enum {
+    PID_SUPPORTED = 0x00,
+    ENGINE_COOLANT_TEMP = 0x05,
+    ENGINE_SPEED = 0x0C, 
+    VEHICLE_SPEED = 0x0D,
+    INTAKE_AIR_TEMP = 0x0F,
+    THROTTLE_POSITION = 0x11,
+    ENGINE_RUN_TIME = 0x1F,
+
+} PID_VALUES;
+
+static const PID_VALUES table_PIDs[NUM_PID_TABLE_ELEM] = {
+    PID_SUPPORTED, ENGINE_COOLANT_TEMP, ENGINE_SPEED, VEHICLE_SPEED, 
+    INTAKE_AIR_TEMP, THROTTLE_POSITION, ENGINE_RUN_TIME
+};
+
+// ----- TASKS and HELPER FUNCTIONS -----
+
+// TWAI Receive Task
 static void twai_receive_task(void *arg)
 {
     while (true)
@@ -86,6 +136,61 @@ static void twai_receive_task(void *arg)
 
         xSemaphoreGive(ctrl_task_sem);  
         xQueueSend(tcp_task_queue, &data_message, portMAX_DELAY);
+    }
+
+    vTaskDelete(NULL);
+}
+
+// TWAI Transmit Task
+static void twai_transmit_task(void *arg)
+{
+    
+    xSemaphoreTake(twai_transmit_sem, portMAX_DELAY);
+    static uint8_t counter_table = 0;
+
+    twai_message_t pid_query_request = {
+        // Message type and format settings
+        .extd = 0,              // Standard Format message (11-bit ID)
+        .rtr = 0,               // Send a data frame
+        .ss = 0,                // Not single shot
+        .self = 0,              // Not a self reception request
+        .dlc_non_comp = 0,      // DLC is less than 8
+        // Message ID and payload
+        .identifier = FUNCTIONAL_REQUEST_ID,
+        .data_length_code = 8,
+        .data = {0},
+    };
+
+    while (true)
+    {
+        ESP_LOGI(TCP_TAG, "Sending query request");
+
+        if (counter_table >= NUM_PID_TABLE_ELEM) {
+            counter_table = 0;
+        }
+
+        uint8_t pid_mode_1;
+        
+        pid_mode_1 = table_PIDs[counter_table];
+
+        pid_query_request.data[0] = 2;
+        pid_query_request.data[1] = SERVICE_MODE_1;
+        pid_query_request.data[2] = pid_mode_1;
+        for (int i=3; i<8; i++) {
+            pid_query_request.data[i] = 0xCC;
+        }
+
+        // is this the correct way of using error check?
+        // and how long should we wait in case the buffer is full?
+        ESP_ERROR_CHECK(twai_transmit(&pid_query_request, portMAX_DELAY));
+
+        // print out the PID as well
+        ESP_LOGI(TCP_TAG, "Transmitted query for service mode 01 PID %" PRIu8 " ", pid_mode_1);
+        
+        //Change the delay here as needed
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        counter_table++;
     }
 
     vTaskDelete(NULL);
@@ -130,34 +235,38 @@ static int tcp_transmit(const int sock)
     return 0;
 }
 
-static const char* SCAN_TAG = "SCAN";
 
-static void scan_and_print(void)
+/* Wi-Fi SoftAP */
+
+static void wifi_init_softap(void)
 {
-    wifi_scan_config_t scan_cfg = {
-        .ssid = 0,
-        .bssid = 0,
-        .channel = 0,
-        .show_hidden = true,
-        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
-        .scan_time.active.min = 100,
-        .scan_time.active.max = 300,
-    };
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_ap();
 
-    ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_cfg, true));
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    uint16_t ap_num = 0;
-    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&ap_num));
-    wifi_ap_record_t *recs = calloc(ap_num, sizeof(wifi_ap_record_t));
-    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&ap_num, recs));
+    wifi_config_t wifi_config = { 0 };
 
-    ESP_LOGI(SCAN_TAG, "Found %u APs", ap_num);
-    for (int i = 0; i < ap_num; i++) {
-        ESP_LOGI(SCAN_TAG, "SSID: '%s' RSSI:%d chan:%d auth:%d",
-                 (char*)recs[i].ssid, recs[i].rssi, recs[i].primary, recs[i].authmode);
-    }
-    free(recs);
+    memcpy(wifi_config.ap.ssid, AP_SSID, strlen(AP_SSID));
+    memcpy(wifi_config.ap.password, AP_PASS, strlen(AP_PASS));
+    wifi_config.ap.ssid_len = strlen(AP_SSID);
+    wifi_config.ap.channel = AP_CHANNEL;
+    wifi_config.ap.max_connection = AP_MAX_CONN;
+    wifi_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    ESP_LOGI(TAG, "ESP32 SoftAP started");
+    ESP_LOGI(TAG, "SSID: %s", AP_SSID);
+    ESP_LOGI(TAG, "Password: %s", AP_PASS);
+    ESP_LOGI(TAG, "AP IP: 192.168.4.1");
+    ESP_LOGI(TAG, "TCP server listening on port: %d", PORT);
 }
+
 
 static void tcp_server_task(void *pvParameters)
 {
@@ -170,8 +279,6 @@ static void tcp_server_task(void *pvParameters)
     int keepCount = KEEPALIVE_COUNT;
     struct sockaddr_storage dest_addr;
 
-    
-
 #ifdef CONFIG_EXAMPLE_IPV4
     if (addr_family == AF_INET) {
         struct sockaddr_in *dest_addr_ip4 = (struct sockaddr_in *)&dest_addr;
@@ -181,7 +288,6 @@ static void tcp_server_task(void *pvParameters)
         ip_protocol = IPPROTO_IP;
     }
 #endif
-
 
     int listen_sock = socket(addr_family, SOCK_STREAM, ip_protocol);
     if (listen_sock < 0) {
@@ -248,7 +354,6 @@ static void tcp_server_task(void *pvParameters)
                     break;
             }
         }
-       
         
         shutdown(sock, 0);
         close(sock);
@@ -274,51 +379,27 @@ void app_main(void)
 {
    
     ESP_ERROR_CHECK(nvs_flash_init());
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    /* This helper function configures Wi-Fi or Ethernet, as selected in menuconfig.
-     * Read "Establishing Wi-Fi or Ethernet Connection" section in
-     * examples/protocols/README.md for more information about this function.
-     */
-//     esp_netif_create_default_wifi_sta();
-
-// wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-// ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-// ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-// ESP_ERROR_CHECK(esp_wifi_start());   // <-- THIS is why you were failing
-
-
-//      scan_and_print();
-
-    ESP_ERROR_CHECK(example_connect());
-
-    wifi_scan_config_t scan_cfg = {
-    .ssid = 0,
-    .bssid = 0,
-    .channel = 0,
-    .show_hidden = true
-};
-ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_cfg, true));
-
+    wifi_init_softap();
+    
     // Syncrhonization
     ctrl_task_sem = xSemaphoreCreateBinary();
     twai_receive_sem = xSemaphoreCreateBinary();
+    twai_transmit_sem = xSemaphoreCreateBinary();
     done_sem = xSemaphoreCreateBinary();
     tcp_task_queue = xQueueCreate(5, sizeof(twai_message_t));
     
     // Create tasks
     xTaskCreatePinnedToCore(twai_receive_task, "TWAI_Receive", 4096, NULL, TWAI_RECEIVE_TASK_PRIO, NULL, 1);
     xTaskCreatePinnedToCore(control_task, "TWAI_ctrl", 4096, NULL, CTRL_TASK_PRIO, NULL, 1);
+    xTaskCreatePinnedToCore(twai_transmit_task, "TWAI_TRANSMIT", 4096, NULL, TWAI_TRANSMIT_TASK_PRIO, NULL, 1);
 #ifdef CONFIG_EXAMPLE_IPV4
     xTaskCreatePinnedToCore(tcp_server_task, "tcp_task", 4096, (void*)AF_INET, TCP_TASK_PRIO, NULL, 0);
 #endif
 
-
      //Install TWAI driver
     ESP_ERROR_CHECK(twai_driver_install(&g_config, &t_config, &f_config));
     ESP_LOGI(GEN_TAG, "Driver installed");
-
 
     // Start the TWAI driver
     ESP_ERROR_CHECK(twai_start());  
@@ -326,11 +407,12 @@ ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_cfg, true));
 
     // Start program
     xSemaphoreGive(ctrl_task_sem);
+    xSemaphoreGive(twai_transmit_sem);
     xSemaphoreTake(done_sem, portMAX_DELAY);   // Wait for completion
 
+    // Stop the TWAI driver
     ESP_ERROR_CHECK(twai_stop());  
     ESP_LOGI(GEN_TAG, "TWAI stopped");
-
 
     //Uninstall TWAI driver
     ESP_ERROR_CHECK(twai_driver_uninstall());
@@ -340,5 +422,4 @@ ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_cfg, true));
     vSemaphoreDelete(ctrl_task_sem);
     vSemaphoreDelete(twai_receive_sem);
     vQueueDelete(tcp_task_queue);
-
 }
