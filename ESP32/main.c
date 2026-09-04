@@ -71,9 +71,27 @@ const int tcp_payload_size = 13;
 static const twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
 static const twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(TX_GPIO_NUM, RX_GPIO_NUM, TWAI_MODE_NORMAL);
 
-static const twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+//static const twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+static const twai_filter_config_t f_config = 
+{ 
+    .acceptance_code = 0x7E8 << 21,
+    .acceptance_mask = (0x007 << 21) | 0x1FFFFF,
+    .single_filter = true,
+};
 
+/* 0x7E8 (0b 0111 1110 1000) to 0x7EF (0b 0111 1110 1111)
+    The least three significant bits are the only ones 
+    that don't matter in the 11-bit ID
 
+    Legacy ESP-IDF: don't care about 1s in the filter
+    0b 000 0000 0111 (0x007)
+    We shift this 11-bit pattern to the left of the 32 bit mask 
+    (meaning 21 bits shifted left)
+
+    the 21 bits on the right now are don't care's 
+    so we extend 1s to the right 
+    0b 1 1111 1111 1111 1111 1111 (0x1FFFFF)
+*/
 
 
 static twai_message_t data_message = {
@@ -119,7 +137,7 @@ static const PID_VALUES table_PIDs[NUM_PID_TABLE_ELEM] = {
 
 // ----- TASKS and HELPER FUNCTIONS -----
 
-// TWAI Receive Task
+// CAN/TWAI Receive Task
 static void twai_receive_task(void *arg)
 {
     while (true)
@@ -141,7 +159,7 @@ static void twai_receive_task(void *arg)
     vTaskDelete(NULL);
 }
 
-// TWAI Transmit Task
+// CAN/TWAI Transmit Task
 static void twai_transmit_task(void *arg)
 {
     
@@ -236,8 +254,7 @@ static int tcp_transmit(const int sock)
 }
 
 
-/* Wi-Fi SoftAP */
-
+/* Wi-Fi SoftAP initialization */
 static void wifi_init_softap(void)
 {
     ESP_ERROR_CHECK(esp_netif_init());
@@ -267,7 +284,7 @@ static void wifi_init_softap(void)
     ESP_LOGI(TAG, "TCP server listening on port: %d", PORT);
 }
 
-
+// establishes TCP connection and performs data transfer
 static void tcp_server_task(void *pvParameters)
 {
     char addr_str[128];
@@ -364,6 +381,8 @@ CLEAN_UP:
     vTaskDelete(NULL);
 }
 
+/* primary task for synchronization between 
+   receiving data and Wi-Fi */
 static void control_task(void *arg)
 {
     while (true)
