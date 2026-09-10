@@ -40,18 +40,29 @@ static const char *TAG = "WIFI_VEHICLE_AP";
 
 
 /* ----- Wi-Fi Connection ----- */
+/*
 #define PORT                        CONFIG_EXAMPLE_PORT
 #define KEEPALIVE_IDLE              CONFIG_EXAMPLE_KEEPALIVE_IDLE
 #define KEEPALIVE_INTERVAL          CONFIG_EXAMPLE_KEEPALIVE_INTERVAL
 #define KEEPALIVE_COUNT             CONFIG_EXAMPLE_KEEPALIVE_COUNT
+*/ 
+/* ----- Wi-Fi Connection ----- */
+
+#define PORT                3333
+#define KEEPALIVE_IDLE      5
+#define KEEPALIVE_INTERVAL  5
+#define KEEPALIVE_COUNT     3
+
+#define CONFIG_EXAMPLE_IPV4 1
+
 
 // -- CAN Bus --
 
 #define MESSAGE_ID 0xA0
 #define FUNCTIONAL_REQUEST_ID 0x7DF
 
-#define TWAI_TRANSMIT_TASK_PRIO 8
-#define TWAI_RECEIVE_TASK_PRIO 9
+#define TWAI_RECEIVE_TASK_PRIO 8
+#define TWAI_TRANSMIT_TASK_PRIO 9
 #define TCP_TASK_PRIO 10
 #define CTRL_TASK_PRIO 11
 
@@ -71,13 +82,13 @@ const int tcp_payload_size = 13;
 static const twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
 static const twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(TX_GPIO_NUM, RX_GPIO_NUM, TWAI_MODE_NORMAL);
 
-//static const twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-static const twai_filter_config_t f_config = 
+static const twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+/* static const twai_filter_config_t f_config = 
 { 
     .acceptance_code = 0x7E8 << 21,
     .acceptance_mask = (0x007 << 21) | 0x1FFFFF,
     .single_filter = true,
-};
+};*/
 
 /* 0x7E8 (0b 0111 1110 1000) to 0x7EF (0b 0111 1110 1111)
     The least three significant bits are the only ones 
@@ -117,10 +128,11 @@ static SemaphoreHandle_t done_sem;
 static QueueHandle_t tcp_task_queue;
 
 // PIDs
-#define NUM_PID_TABLE_ELEM 7 // update as needed
+#define NUM_PID_TABLE_ELEM 6 // update as needed
+
+#define PID_SUPPORTED 0x00 // only called once at the beginning
 
 typedef enum {
-    PID_SUPPORTED = 0x00,
     ENGINE_COOLANT_TEMP = 0x05,
     ENGINE_SPEED = 0x0C, 
     VEHICLE_SPEED = 0x0D,
@@ -131,7 +143,7 @@ typedef enum {
 } PID_VALUES;
 
 static const PID_VALUES table_PIDs[NUM_PID_TABLE_ELEM] = {
-    PID_SUPPORTED, ENGINE_COOLANT_TEMP, ENGINE_SPEED, VEHICLE_SPEED, 
+    ENGINE_COOLANT_TEMP, ENGINE_SPEED, VEHICLE_SPEED, 
     INTAKE_AIR_TEMP, THROTTLE_POSITION, ENGINE_RUN_TIME
 };
 
@@ -159,12 +171,33 @@ static void twai_receive_task(void *arg)
     vTaskDelete(NULL);
 }
 
+
+// Helper function for confirming that PIDs are supported
+void query_PIDs_supported(twai_message_t* pid_query_request_ptr, uint8_t PID_value) {
+    
+    ESP_LOGI(TCP_TAG, "Sending query request");
+    
+    pid_query_request_ptr->data[0] = 2;
+    pid_query_request_ptr->data[1] = SERVICE_MODE_1;
+    pid_query_request_ptr->data[2] = PID_value;
+    for (uint8_t i=3; i<8; i++) {
+        pid_query_request_ptr->data[i] = 0xCC;
+    }
+
+    // is this the correct way of using error check?
+    // and how long should we wait in case the buffer is full?
+    //ESP_ERROR_CHECK(twai_transmit(&pid_query_request, portMAX_DELAY));
+    //if (twai_transmit(&pid_query_request, portMAX_DELAY) == ESP_OK) {
+    if (twai_transmit(pid_query_request_ptr, portMAX_DELAY) == ESP_OK) {
+        // print out the PID as well
+        ESP_LOGI(TCP_TAG, "Transmitted query for service mode 01 PID %" PRIu8 " ", PID_value);
+    } 
+}
+
 // CAN/TWAI Transmit Task
 static void twai_transmit_task(void *arg)
 {
-    
     xSemaphoreTake(twai_transmit_sem, portMAX_DELAY);
-    static uint8_t counter_table = 0;
 
     twai_message_t pid_query_request = {
         // Message type and format settings
@@ -178,37 +211,24 @@ static void twai_transmit_task(void *arg)
         .data_length_code = 8,
         .data = {0},
     };
+    
+    uint8_t pid_mode_1;
 
-    while (true)
-    {
-        ESP_LOGI(TCP_TAG, "Sending query request");
+    // first confirm that the PIDs are supported
+    query_PIDs_supported(&pid_query_request, PID_SUPPORTED);
 
-        if (counter_table >= NUM_PID_TABLE_ELEM) {
-            counter_table = 0;
+    while (true) {
+
+        for (uint8_t i = 0; i < NUM_PID_TABLE_ELEM; i++) {
+            
+            pid_mode_1 = table_PIDs[i];
+
+            // call helper function to transmit CAN IDs
+            query_PIDs_supported(&pid_query_request, pid_mode_1);
         }
 
-        uint8_t pid_mode_1;
-        
-        pid_mode_1 = table_PIDs[counter_table];
-
-        pid_query_request.data[0] = 2;
-        pid_query_request.data[1] = SERVICE_MODE_1;
-        pid_query_request.data[2] = pid_mode_1;
-        for (int i=3; i<8; i++) {
-            pid_query_request.data[i] = 0xCC;
-        }
-
-        // is this the correct way of using error check?
-        // and how long should we wait in case the buffer is full?
-        ESP_ERROR_CHECK(twai_transmit(&pid_query_request, portMAX_DELAY));
-
-        // print out the PID as well
-        ESP_LOGI(TCP_TAG, "Transmitted query for service mode 01 PID %" PRIu8 " ", pid_mode_1);
-        
         //Change the delay here as needed
         vTaskDelay(pdMS_TO_TICKS(10));
-
-        counter_table++;
     }
 
     vTaskDelete(NULL);
