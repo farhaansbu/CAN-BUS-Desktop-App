@@ -48,12 +48,12 @@ static const char *TAG = "WIFI_VEHICLE_AP";
 */ 
 /* ----- Wi-Fi Connection ----- */
 
+#define SERVER_IP "192.168.4.2" // update as needed for the PC
 #define PORT                3333
+
 #define KEEPALIVE_IDLE      5
 #define KEEPALIVE_INTERVAL  5
 #define KEEPALIVE_COUNT     3
-
-#define CONFIG_EXAMPLE_IPV4 1
 
 
 // -- CAN Bus --
@@ -156,16 +156,17 @@ static void twai_receive_task(void *arg)
     {
         xSemaphoreTake(twai_receive_sem, portMAX_DELAY);
         ESP_LOGI(READ_TAG, "Receiving data");
-        twai_receive(&data_message, portMAX_DELAY);
-        ESP_LOGI(READ_TAG, "Received data with %" PRIu32 " ", data_message.identifier);
-        ESP_LOGI(READ_TAG, "Data: ");
-        for (int i = 0; i < 8; ++i)
-        {
-            ESP_LOGI(READ_TAG, "%u", data_message.data[i]);
+        
+        if ( (twai_receive(&data_message, portMAX_DELAY) ) == ESP_OK) {
+            ESP_LOGI(READ_TAG, "Received data with %" PRIu32 " ", data_message.identifier);
+            ESP_LOGI(READ_TAG, "Data: ");
+            for (uint8_t i = 0; i < 8; ++i) {
+                ESP_LOGI(READ_TAG, "%u", data_message.data[i]);
+            }
+            xQueueSend(tcp_task_queue, &data_message, portMAX_DELAY);
         }
 
         xSemaphoreGive(ctrl_task_sem);  
-        xQueueSend(tcp_task_queue, &data_message, portMAX_DELAY);
     }
 
     vTaskDelete(NULL);
@@ -253,7 +254,7 @@ static int tcp_transmit(const int sock)
         } else if (len == 0) {
             ESP_LOGW(TAG, "Connection closed");
         } else {
-            rx_buffer[len] = 0; // Null-terminate whatever is received and treat it like a string
+            //rx_buffer[len] = 0; // Null-terminate whatever is received and treat it like a string
 
             // send() can return less bytes than supplied length.
             // Walk-around for robust implementation.
@@ -261,7 +262,7 @@ static int tcp_transmit(const int sock)
             int to_write = len;
             while (to_write > 0) {
                 int written = send(sock, rx_buffer + (len - to_write), to_write, 0);
-                if (written < 0) {
+                if (written <= 0) {
                     ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
                     // Failed to transmit , giving up
                     return -1;
@@ -300,104 +301,84 @@ static void wifi_init_softap(void)
     ESP_LOGI(TAG, "ESP32 SoftAP started");
     ESP_LOGI(TAG, "SSID: %s", AP_SSID);
     ESP_LOGI(TAG, "Password: %s", AP_PASS);
-    ESP_LOGI(TAG, "AP IP: 192.168.4.1");
-    ESP_LOGI(TAG, "TCP server listening on port: %d", PORT);
+    //ESP_LOGI(TAG, "AP IP: 192.168.4.1");
+    ESP_LOGI(TAG, "TCP client target: %s:%d", SERVER_IP, PORT);
 }
 
-// establishes TCP connection and performs data transfer
-static void tcp_server_task(void *pvParameters)
+// Establishes TCP connection to the C++ desktop server
+// and sends received CAN frames to it
+static void tcp_client_task(void *pvParameters)
 {
-    char addr_str[128];
-    int addr_family = (int)pvParameters;
-    int ip_protocol = 0;
+    (void)pvParameters;
+
     int keepAlive = 1;
     int keepIdle = KEEPALIVE_IDLE;
     int keepInterval = KEEPALIVE_INTERVAL;
     int keepCount = KEEPALIVE_COUNT;
-    struct sockaddr_storage dest_addr;
 
-#ifdef CONFIG_EXAMPLE_IPV4
-    if (addr_family == AF_INET) {
-        struct sockaddr_in *dest_addr_ip4 = (struct sockaddr_in *)&dest_addr;
-        dest_addr_ip4->sin_addr.s_addr = htonl(INADDR_ANY);
-        dest_addr_ip4->sin_family = AF_INET;
-        dest_addr_ip4->sin_port = htons(PORT);
-        ip_protocol = IPPROTO_IP;
-    }
-#endif
+    while (1)
+    {
+        struct sockaddr_in dest_addr = {0};
 
-    int listen_sock = socket(addr_family, SOCK_STREAM, ip_protocol);
-    if (listen_sock < 0) {
-        ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
-        vTaskDelete(NULL);
-        return;
-    }
-    int opt = 1;
-    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-#if defined(CONFIG_EXAMPLE_IPV4) && defined(CONFIG_EXAMPLE_IPV6)
-    // Note that by default IPV6 binds to both protocols, it is must be disabled
-    // if both protocols used at the same time (used in CI)
-    setsockopt(listen_sock, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt));
-#endif
+        // Destination = PC running the C++ TCP server
+        dest_addr.sin_addr.s_addr = inet_addr(SERVER_IP);
+        dest_addr.sin_family = AF_INET;
+        dest_addr.sin_port = htons(PORT);
 
-    ESP_LOGI(TAG, "Socket created");
+        // Create TCP socket
+        int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
 
-    int err = bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-    if (err != 0) {
-        ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
-        ESP_LOGE(TAG, "IPPROTO: %d", addr_family);
-        goto CLEAN_UP;
-    }
-    ESP_LOGI(TAG, "Socket bound, port %d", PORT);
-
-    err = listen(listen_sock, 1);
-    if (err != 0) {
-        ESP_LOGE(TAG, "Error occurred during listen: errno %d", errno);
-        goto CLEAN_UP;
-    }
-
-    while (1) {
-
-        ESP_LOGI(TAG, "Socket ready to send");
-
-        struct sockaddr_storage source_addr; // Large enough for both IPv4 or IPv6
-        socklen_t addr_len = sizeof(source_addr);
-        int sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
-        if (sock < 0) {
-            ESP_LOGE(TAG, "Unable to accept connection: errno %d", errno);
-            break;
+        if (sock < 0)
+        {
+            ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            continue;
         }
 
-        // Set tcp keepalive option
+        // Configure TCP keepalive
         setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(int));
         setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepIdle, sizeof(int));
         setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(int));
         setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(int));
-        // Convert ip address to string
-#ifdef CONFIG_EXAMPLE_IPV4
-        if (source_addr.ss_family == PF_INET) {
-            inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr, addr_str, sizeof(addr_str) - 1);
+
+        ESP_LOGI(TAG, "Connecting to C++ TCP server at %s:%d", SERVER_IP, PORT);
+
+        // ESP32 initiates connection to PC
+        int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+
+        if (err != 0)
+        {
+            ESP_LOGW(TAG, "Unable to connect to TCP server: errno %d", errno);
+            close(sock);
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            continue;
         }
-#endif
 
-        ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);
+        ESP_LOGI(TAG, "Connected to C++ TCP server at %s:%d", SERVER_IP, PORT);
 
+        // Once connected, wait for CAN frames
         while (1)
         {
             if (xQueueReceive(tcp_task_queue, &tcp_message, portMAX_DELAY) == pdTRUE)
             {
-                ESP_LOGI(TCP_TAG, "Sending can frame over TCP");
+                ESP_LOGI(TCP_TAG, "Sending CAN frame over TCP");
+
                 if (tcp_transmit(sock) < 0)
+                {
+                    ESP_LOGW(TAG, "TCP connection lost");
                     break;
+                }
             }
         }
-        
-        shutdown(sock, 0);
+
+        // Close dead connection
+        shutdown(sock, SHUT_RDWR);
         close(sock);
+
+        ESP_LOGW(TAG, "Socket closed, retrying connection...");
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
 
-CLEAN_UP:
-    close(listen_sock);
     vTaskDelete(NULL);
 }
 
@@ -432,9 +413,7 @@ void app_main(void)
     xTaskCreatePinnedToCore(twai_receive_task, "TWAI_Receive", 4096, NULL, TWAI_RECEIVE_TASK_PRIO, NULL, 1);
     xTaskCreatePinnedToCore(control_task, "TWAI_ctrl", 4096, NULL, CTRL_TASK_PRIO, NULL, 1);
     xTaskCreatePinnedToCore(twai_transmit_task, "TWAI_TRANSMIT", 4096, NULL, TWAI_TRANSMIT_TASK_PRIO, NULL, 1);
-#ifdef CONFIG_EXAMPLE_IPV4
-    xTaskCreatePinnedToCore(tcp_server_task, "tcp_task", 4096, (void*)AF_INET, TCP_TASK_PRIO, NULL, 0);
-#endif
+    xTaskCreatePinnedToCore(tcp_client_task, "tcp_task", 4096, NULL, TCP_TASK_PRIO, NULL, 0);
 
      //Install TWAI driver
     ESP_ERROR_CHECK(twai_driver_install(&g_config, &t_config, &f_config));
