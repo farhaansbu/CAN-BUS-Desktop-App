@@ -2,3 +2,4 @@
 .DS_Store
 ESP32/build/
 ESP32/sdkconfig
+ESP32/main/CMakeLists.txt
