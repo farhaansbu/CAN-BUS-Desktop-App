@@ -173,7 +173,7 @@ static void twai_receive_task(void *arg)
 
 
 // Helper function for confirming that PIDs are supported
-void query_PIDs_supported(twai_message_t* pid_query_request_ptr, uint8_t PID_value) {
+void query_PID(twai_message_t* pid_query_request_ptr, uint8_t PID_value) {
     
     ESP_LOGI(TCP_TAG, "Sending query request");
     
@@ -215,7 +215,7 @@ static void twai_transmit_task(void *arg)
     uint8_t pid_mode_1;
 
     // first confirm that the PIDs are supported
-    query_PIDs_supported(&pid_query_request, PID_SUPPORTED);
+    query_PID(&pid_query_request, PID_SUPPORTED);
 
     while (true) {
 
@@ -224,7 +224,7 @@ static void twai_transmit_task(void *arg)
             pid_mode_1 = table_PIDs[i];
 
             // call helper function to transmit CAN IDs
-            query_PIDs_supported(&pid_query_request, pid_mode_1);
+            query_PID(&pid_query_request, pid_mode_1);
         }
 
         //Change the delay here as needed
