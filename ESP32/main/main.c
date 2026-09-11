@@ -40,18 +40,29 @@ static const char *TAG = "WIFI_VEHICLE_AP";
 
 
 /* ----- Wi-Fi Connection ----- */
+/*
 #define PORT                        CONFIG_EXAMPLE_PORT
 #define KEEPALIVE_IDLE              CONFIG_EXAMPLE_KEEPALIVE_IDLE
 #define KEEPALIVE_INTERVAL          CONFIG_EXAMPLE_KEEPALIVE_INTERVAL
 #define KEEPALIVE_COUNT             CONFIG_EXAMPLE_KEEPALIVE_COUNT
+*/ 
+/* ----- Wi-Fi Connection ----- */
+
+#define SERVER_IP "192.168.4.2" // update as needed for the PC
+#define PORT                3333
+
+#define KEEPALIVE_IDLE      5
+#define KEEPALIVE_INTERVAL  5
+#define KEEPALIVE_COUNT     3
+
 
 // -- CAN Bus --
 
 #define MESSAGE_ID 0xA0
 #define FUNCTIONAL_REQUEST_ID 0x7DF
 
-#define TWAI_TRANSMIT_TASK_PRIO 8
-#define TWAI_RECEIVE_TASK_PRIO 9
+#define TWAI_RECEIVE_TASK_PRIO 8
+#define TWAI_TRANSMIT_TASK_PRIO 9
 #define TCP_TASK_PRIO 10
 #define CTRL_TASK_PRIO 11
 
@@ -72,8 +83,26 @@ static const twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
 static const twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(TX_GPIO_NUM, RX_GPIO_NUM, TWAI_MODE_NORMAL);
 
 static const twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+/* static const twai_filter_config_t f_config = 
+{ 
+    .acceptance_code = 0x7E8 << 21,
+    .acceptance_mask = (0x007 << 21) | 0x1FFFFF,
+    .single_filter = true,
+};*/
 
+/* 0x7E8 (0b 0111 1110 1000) to 0x7EF (0b 0111 1110 1111)
+    The least three significant bits are the only ones 
+    that don't matter in the 11-bit ID
 
+    Legacy ESP-IDF: don't care about 1s in the filter
+    0b 000 0000 0111 (0x007)
+    We shift this 11-bit pattern to the left of the 32 bit mask 
+    (meaning 21 bits shifted left)
+
+    the 21 bits on the right now are don't care's 
+    so we extend 1s to the right 
+    0b 1 1111 1111 1111 1111 1111 (0x1FFFFF)
+*/
 
 
 static twai_message_t data_message = {
@@ -99,10 +128,11 @@ static SemaphoreHandle_t done_sem;
 static QueueHandle_t tcp_task_queue;
 
 // PIDs
-#define NUM_PID_TABLE_ELEM 7 // update as needed
+#define NUM_PID_TABLE_ELEM 6 // update as needed
+
+#define PID_SUPPORTED 0x00 // only called once at the beginning
 
 typedef enum {
-    PID_SUPPORTED = 0x00,
     ENGINE_COOLANT_TEMP = 0x05,
     ENGINE_SPEED = 0x0C, 
     VEHICLE_SPEED = 0x0D,
@@ -113,40 +143,62 @@ typedef enum {
 } PID_VALUES;
 
 static const PID_VALUES table_PIDs[NUM_PID_TABLE_ELEM] = {
-    PID_SUPPORTED, ENGINE_COOLANT_TEMP, ENGINE_SPEED, VEHICLE_SPEED, 
+    ENGINE_COOLANT_TEMP, ENGINE_SPEED, VEHICLE_SPEED, 
     INTAKE_AIR_TEMP, THROTTLE_POSITION, ENGINE_RUN_TIME
 };
 
 // ----- TASKS and HELPER FUNCTIONS -----
 
-// TWAI Receive Task
+// CAN/TWAI Receive Task
 static void twai_receive_task(void *arg)
 {
     while (true)
     {
         xSemaphoreTake(twai_receive_sem, portMAX_DELAY);
         ESP_LOGI(READ_TAG, "Receiving data");
-        twai_receive(&data_message, portMAX_DELAY);
-        ESP_LOGI(READ_TAG, "Received data with %" PRIu32 " ", data_message.identifier);
-        ESP_LOGI(READ_TAG, "Data: ");
-        for (int i = 0; i < 8; ++i)
-        {
-            ESP_LOGI(READ_TAG, "%u", data_message.data[i]);
+        
+        if ( (twai_receive(&data_message, portMAX_DELAY) ) == ESP_OK) {
+            ESP_LOGI(READ_TAG, "Received data with %" PRIu32 " ", data_message.identifier);
+            ESP_LOGI(READ_TAG, "Data: ");
+            for (uint8_t i = 0; i < 8; ++i) {
+                ESP_LOGI(READ_TAG, "%u", data_message.data[i]);
+            }
+            xQueueSend(tcp_task_queue, &data_message, portMAX_DELAY);
         }
 
         xSemaphoreGive(ctrl_task_sem);  
-        xQueueSend(tcp_task_queue, &data_message, portMAX_DELAY);
     }
 
     vTaskDelete(NULL);
 }
 
-// TWAI Transmit Task
+
+// Helper function for confirming that PIDs are supported
+void query_PID(twai_message_t* pid_query_request_ptr, uint8_t PID_value) {
+    
+    ESP_LOGI(TCP_TAG, "Sending query request");
+    
+    pid_query_request_ptr->data[0] = 2;
+    pid_query_request_ptr->data[1] = SERVICE_MODE_1;
+    pid_query_request_ptr->data[2] = PID_value;
+    for (uint8_t i=3; i<8; i++) {
+        pid_query_request_ptr->data[i] = 0xCC;
+    }
+
+    // is this the correct way of using error check?
+    // and how long should we wait in case the buffer is full?
+    //ESP_ERROR_CHECK(twai_transmit(&pid_query_request, portMAX_DELAY));
+    //if (twai_transmit(&pid_query_request, portMAX_DELAY) == ESP_OK) {
+    if (twai_transmit(pid_query_request_ptr, portMAX_DELAY) == ESP_OK) {
+        // print out the PID as well
+        ESP_LOGI(TCP_TAG, "Transmitted query for service mode 01 PID %" PRIu8 " ", PID_value);
+    } 
+}
+
+// CAN/TWAI Transmit Task
 static void twai_transmit_task(void *arg)
 {
-    
     xSemaphoreTake(twai_transmit_sem, portMAX_DELAY);
-    static uint8_t counter_table = 0;
 
     twai_message_t pid_query_request = {
         // Message type and format settings
@@ -160,37 +212,24 @@ static void twai_transmit_task(void *arg)
         .data_length_code = 8,
         .data = {0},
     };
+    
+    uint8_t pid_mode_1;
 
-    while (true)
-    {
-        ESP_LOGI(TCP_TAG, "Sending query request");
+    // first confirm that the PIDs are supported
+    query_PID(&pid_query_request, PID_SUPPORTED);
 
-        if (counter_table >= NUM_PID_TABLE_ELEM) {
-            counter_table = 0;
+    while (true) {
+
+        for (uint8_t i = 0; i < NUM_PID_TABLE_ELEM; i++) {
+            
+            pid_mode_1 = table_PIDs[i];
+
+            // call helper function to transmit CAN IDs
+            query_PID(&pid_query_request, pid_mode_1);
         }
 
-        uint8_t pid_mode_1;
-        
-        pid_mode_1 = table_PIDs[counter_table];
-
-        pid_query_request.data[0] = 2;
-        pid_query_request.data[1] = SERVICE_MODE_1;
-        pid_query_request.data[2] = pid_mode_1;
-        for (int i=3; i<8; i++) {
-            pid_query_request.data[i] = 0xCC;
-        }
-
-        // is this the correct way of using error check?
-        // and how long should we wait in case the buffer is full?
-        ESP_ERROR_CHECK(twai_transmit(&pid_query_request, portMAX_DELAY));
-
-        // print out the PID as well
-        ESP_LOGI(TCP_TAG, "Transmitted query for service mode 01 PID %" PRIu8 " ", pid_mode_1);
-        
         //Change the delay here as needed
         vTaskDelay(pdMS_TO_TICKS(10));
-
-        counter_table++;
     }
 
     vTaskDelete(NULL);
@@ -215,7 +254,7 @@ static int tcp_transmit(const int sock)
         } else if (len == 0) {
             ESP_LOGW(TAG, "Connection closed");
         } else {
-            rx_buffer[len] = 0; // Null-terminate whatever is received and treat it like a string
+            //rx_buffer[len] = 0; // Null-terminate whatever is received and treat it like a string
 
             // send() can return less bytes than supplied length.
             // Walk-around for robust implementation.
@@ -223,7 +262,7 @@ static int tcp_transmit(const int sock)
             int to_write = len;
             while (to_write > 0) {
                 int written = send(sock, rx_buffer + (len - to_write), to_write, 0);
-                if (written < 0) {
+                if (written <= 0) {
                     ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
                     // Failed to transmit , giving up
                     return -1;
@@ -236,8 +275,7 @@ static int tcp_transmit(const int sock)
 }
 
 
-/* Wi-Fi SoftAP */
-
+/* Wi-Fi SoftAP initialization */
 static void wifi_init_softap(void)
 {
     ESP_ERROR_CHECK(esp_netif_init());
@@ -263,107 +301,89 @@ static void wifi_init_softap(void)
     ESP_LOGI(TAG, "ESP32 SoftAP started");
     ESP_LOGI(TAG, "SSID: %s", AP_SSID);
     ESP_LOGI(TAG, "Password: %s", AP_PASS);
-    ESP_LOGI(TAG, "AP IP: 192.168.4.1");
-    ESP_LOGI(TAG, "TCP server listening on port: %d", PORT);
+    //ESP_LOGI(TAG, "AP IP: 192.168.4.1");
+    ESP_LOGI(TAG, "TCP client target: %s:%d", SERVER_IP, PORT);
 }
 
-
-static void tcp_server_task(void *pvParameters)
+// Establishes TCP connection to the C++ desktop server
+// and sends received CAN frames to it
+static void tcp_client_task(void *pvParameters)
 {
-    char addr_str[128];
-    int addr_family = (int)pvParameters;
-    int ip_protocol = 0;
+    (void)pvParameters;
+
     int keepAlive = 1;
     int keepIdle = KEEPALIVE_IDLE;
     int keepInterval = KEEPALIVE_INTERVAL;
     int keepCount = KEEPALIVE_COUNT;
-    struct sockaddr_storage dest_addr;
 
-#ifdef CONFIG_EXAMPLE_IPV4
-    if (addr_family == AF_INET) {
-        struct sockaddr_in *dest_addr_ip4 = (struct sockaddr_in *)&dest_addr;
-        dest_addr_ip4->sin_addr.s_addr = htonl(INADDR_ANY);
-        dest_addr_ip4->sin_family = AF_INET;
-        dest_addr_ip4->sin_port = htons(PORT);
-        ip_protocol = IPPROTO_IP;
-    }
-#endif
+    while (1)
+    {
+        struct sockaddr_in dest_addr = {0};
 
-    int listen_sock = socket(addr_family, SOCK_STREAM, ip_protocol);
-    if (listen_sock < 0) {
-        ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
-        vTaskDelete(NULL);
-        return;
-    }
-    int opt = 1;
-    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-#if defined(CONFIG_EXAMPLE_IPV4) && defined(CONFIG_EXAMPLE_IPV6)
-    // Note that by default IPV6 binds to both protocols, it is must be disabled
-    // if both protocols used at the same time (used in CI)
-    setsockopt(listen_sock, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt));
-#endif
+        // Destination = PC running the C++ TCP server
+        dest_addr.sin_addr.s_addr = inet_addr(SERVER_IP);
+        dest_addr.sin_family = AF_INET;
+        dest_addr.sin_port = htons(PORT);
 
-    ESP_LOGI(TAG, "Socket created");
+        // Create TCP socket
+        int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
 
-    int err = bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-    if (err != 0) {
-        ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
-        ESP_LOGE(TAG, "IPPROTO: %d", addr_family);
-        goto CLEAN_UP;
-    }
-    ESP_LOGI(TAG, "Socket bound, port %d", PORT);
-
-    err = listen(listen_sock, 1);
-    if (err != 0) {
-        ESP_LOGE(TAG, "Error occurred during listen: errno %d", errno);
-        goto CLEAN_UP;
-    }
-
-    while (1) {
-
-        ESP_LOGI(TAG, "Socket ready to send");
-
-        struct sockaddr_storage source_addr; // Large enough for both IPv4 or IPv6
-        socklen_t addr_len = sizeof(source_addr);
-        int sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
-        if (sock < 0) {
-            ESP_LOGE(TAG, "Unable to accept connection: errno %d", errno);
-            break;
+        if (sock < 0)
+        {
+            ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            continue;
         }
 
-        // Set tcp keepalive option
+        // Configure TCP keepalive
         setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(int));
         setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepIdle, sizeof(int));
         setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(int));
         setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(int));
-        // Convert ip address to string
-#ifdef CONFIG_EXAMPLE_IPV4
-        if (source_addr.ss_family == PF_INET) {
-            inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr, addr_str, sizeof(addr_str) - 1);
+
+        ESP_LOGI(TAG, "Connecting to C++ TCP server at %s:%d", SERVER_IP, PORT);
+
+        // ESP32 initiates connection to PC
+        int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+
+        if (err != 0)
+        {
+            ESP_LOGW(TAG, "Unable to connect to TCP server: errno %d", errno);
+            close(sock);
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            continue;
         }
-#endif
 
-        ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);
+        ESP_LOGI(TAG, "Connected to C++ TCP server at %s:%d", SERVER_IP, PORT);
 
+        // Once connected, wait for CAN frames
         while (1)
         {
             if (xQueueReceive(tcp_task_queue, &tcp_message, portMAX_DELAY) == pdTRUE)
             {
-                ESP_LOGI(TCP_TAG, "Sending can frame over TCP");
+                ESP_LOGI(TCP_TAG, "Sending CAN frame over TCP");
+
                 if (tcp_transmit(sock) < 0)
+                {
+                    ESP_LOGW(TAG, "TCP connection lost");
                     break;
+                }
             }
         }
-        
-        shutdown(sock, 0);
+
+        // Close dead connection
+        shutdown(sock, SHUT_RDWR);
         close(sock);
+
+        ESP_LOGW(TAG, "Socket closed, retrying connection...");
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
 
-CLEAN_UP:
-    close(listen_sock);
     vTaskDelete(NULL);
 }
 
+/* primary task for synchronization between 
+   receiving data and Wi-Fi */
 static void control_task(void *arg)
 {
     while (true)
@@ -393,9 +413,7 @@ void app_main(void)
     xTaskCreatePinnedToCore(twai_receive_task, "TWAI_Receive", 4096, NULL, TWAI_RECEIVE_TASK_PRIO, NULL, 1);
     xTaskCreatePinnedToCore(control_task, "TWAI_ctrl", 4096, NULL, CTRL_TASK_PRIO, NULL, 1);
     xTaskCreatePinnedToCore(twai_transmit_task, "TWAI_TRANSMIT", 4096, NULL, TWAI_TRANSMIT_TASK_PRIO, NULL, 1);
-#ifdef CONFIG_EXAMPLE_IPV4
-    xTaskCreatePinnedToCore(tcp_server_task, "tcp_task", 4096, (void*)AF_INET, TCP_TASK_PRIO, NULL, 0);
-#endif
+    xTaskCreatePinnedToCore(tcp_client_task, "tcp_task", 4096, NULL, TCP_TASK_PRIO, NULL, 0);
 
      //Install TWAI driver
     ESP_ERROR_CHECK(twai_driver_install(&g_config, &t_config, &f_config));
